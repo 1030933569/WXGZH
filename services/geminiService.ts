@@ -79,6 +79,154 @@ const callOpenAIImage = async (config: AIConfig, prompt: string, size: string) =
     return data.data[0]?.url || "";
 };
 
+const safeParseJson = async (response: Response) => {
+    try {
+        return await response.json();
+    } catch {
+        return null;
+    }
+};
+
+const dedupeAndSort = (models: string[]) => {
+    return Array.from(new Set(models.map(m => m.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+};
+
+const stripGeminiModelPrefix = (name: string) => name.replace(/^models\//, '');
+
+const withSearchParams = (url: string, params: Record<string, string | undefined>) => {
+    const query = Object.entries(params)
+        .filter(([, v]) => v !== undefined && v !== '')
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+        .join('&');
+    if (!query) return url;
+    return `${url}${url.includes('?') ? '&' : '?'}${query}`;
+};
+
+const formatNetworkError = (e: any) => {
+    const msg = e?.message || String(e);
+    if (/Failed to fetch/i.test(msg)) {
+        return `${msg}（可能是浏览器跨域 CORS 或网络问题）`;
+    }
+    return msg;
+};
+
+export const listModels = async (config: AIConfig): Promise<string[]> => {
+    if (!config.apiKey) throw new Error("请先在设置中配置 API Key");
+
+    // OpenAI Logic
+    if (config.provider === 'openai') {
+        const baseUrl = config.baseUrl ? config.baseUrl.replace(/\/$/, '') : 'https://api.openai.com/v1';
+        try {
+            const response = await fetch(`${baseUrl}/models`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${config.apiKey}`
+                }
+            });
+
+            if (!response.ok) {
+                const errorBody = await safeParseJson(response);
+                const message = errorBody?.error?.message || response.statusText || `HTTP ${response.status}`;
+                throw new Error(`模型列表获取失败: ${message}`);
+            }
+
+            const data = await response.json();
+            const models = (data?.data || []).map((m: any) => m?.id).filter(Boolean);
+            return dedupeAndSort(models);
+        } catch (e: any) {
+            throw new Error(`OpenAI 模型列表获取失败: ${formatNetworkError(e)}`);
+        }
+    }
+
+    // Gemini Logic (REST) - avoid SDK differences, keep it simple for browser usage.
+    const customBase = config.baseUrl && config.baseUrl.trim() !== '' ? config.baseUrl.trim().replace(/\/$/, '') : '';
+    const endpoints: string[] = [];
+    if (customBase) {
+        // Try user's baseUrl directly first.
+        endpoints.push(`${customBase}/models`);
+        // Fallback to common REST base pattern.
+        if (!/\/v1beta(\/|$)/.test(customBase)) {
+            endpoints.push(`${customBase}/v1beta/models`);
+        }
+    } else {
+        endpoints.push('https://generativelanguage.googleapis.com/v1beta/models');
+    }
+
+    let lastError: Error | null = null;
+    for (const endpoint of endpoints) {
+        // 1) Prefer query param to reduce CORS preflight risk.
+        try {
+            const models: string[] = [];
+            let pageToken: string | undefined = undefined;
+            let guard = 0;
+
+            do {
+                guard++;
+                if (guard > 20 || models.length > 500) break;
+
+                const url = withSearchParams(endpoint, { key: config.apiKey, pageToken });
+                const response = await fetch(url, { method: 'GET' });
+
+                if (!response.ok) {
+                    const errorBody = await safeParseJson(response);
+                    const message = errorBody?.error?.message || response.statusText || `HTTP ${response.status}`;
+                    throw new Error(`模型列表获取失败: ${message}`);
+                }
+
+                const data = await response.json();
+                const pageModels = (data?.models || [])
+                    .map((m: any) => stripGeminiModelPrefix(m?.name || ''))
+                    .filter(Boolean);
+                models.push(...pageModels);
+                pageToken = data?.nextPageToken;
+            } while (pageToken);
+
+            return dedupeAndSort(models);
+        } catch (e: any) {
+            lastError = new Error(`Gemini 模型列表获取失败: ${formatNetworkError(e)}`);
+        }
+
+        // 2) Fallback: try header auth (some proxies may require it).
+        try {
+            const models: string[] = [];
+            let pageToken: string | undefined = undefined;
+            let guard = 0;
+
+            do {
+                guard++;
+                if (guard > 20 || models.length > 500) break;
+
+                const url = withSearchParams(endpoint, { pageToken });
+                const response = await fetch(url, {
+                    method: 'GET',
+                    headers: {
+                        'x-goog-api-key': config.apiKey
+                    }
+                });
+
+                if (!response.ok) {
+                    const errorBody = await safeParseJson(response);
+                    const message = errorBody?.error?.message || response.statusText || `HTTP ${response.status}`;
+                    throw new Error(`模型列表获取失败: ${message}`);
+                }
+
+                const data = await response.json();
+                const pageModels = (data?.models || [])
+                    .map((m: any) => stripGeminiModelPrefix(m?.name || ''))
+                    .filter(Boolean);
+                models.push(...pageModels);
+                pageToken = data?.nextPageToken;
+            } while (pageToken);
+
+            return dedupeAndSort(models);
+        } catch (e: any) {
+            lastError = new Error(`Gemini 模型列表获取失败: ${formatNetworkError(e)}`);
+        }
+    }
+
+    throw lastError || new Error("模型列表获取失败：未知错误");
+};
+
 // --- Exported Services ---
 
 export const generateChatResponse = async (

@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { PixelModal, PixelButton, PixelInput, PixelSelect, PixelLabel, PixelSwitch } from './PixelComponents';
 import { AppConfig, AIConfig } from '../types';
-import { generateChatResponse, generateImage } from '../services/geminiService';
+import { generateChatResponse, generateImage, listModels } from '../services/geminiService';
 import { DEFAULT_CONFIG } from '../constants';
 import { Upload, Download, RefreshCw, Save, CheckCircle, AlertTriangle, Terminal, Image as ImageIcon, MessageSquare, Server, Key, Cpu, Globe } from 'lucide-react';
 
@@ -22,6 +22,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [activeTab, setActiveTab] = useState<'ai' | 'general' | 'data'>('ai');
   const [tempConfig, setTempConfig] = useState<AppConfig>(JSON.parse(JSON.stringify(config)));
   const [testStatus, setTestStatus] = useState<{msg: string, type: 'success' | 'error' | 'loading' | ''}>({msg: '', type: ''});
+  const [chatModelOptions, setChatModelOptions] = useState<string[]>([]);
+  const [imageModelOptions, setImageModelOptions] = useState<string[]>([]);
+  const [chatModelsLoading, setChatModelsLoading] = useState(false);
+  const [imageModelsLoading, setImageModelsLoading] = useState(false);
+  const [chatModelsError, setChatModelsError] = useState<string | null>(null);
+  const [imageModelsError, setImageModelsError] = useState<string | null>(null);
   
   // Refs for file inputs
   const configInputRef = useRef<HTMLInputElement>(null);
@@ -97,6 +103,59 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         setTestStatus({msg: `绘图测试失败: ${e.message}`, type: 'error'});
     }
   }
+  
+  const fetchChatModels = async () => {
+    setChatModelsError(null);
+    setChatModelOptions([]);
+    
+    if (!tempConfig.ai.chat.apiKey) {
+        setChatModelsError('请先填写 Chat API Key');
+        return;
+    }
+    
+    setChatModelsLoading(true);
+    try {
+        const models = await listModels(tempConfig.ai.chat);
+        setChatModelOptions(models);
+        if (models.length === 0) setChatModelsError('未获取到任何模型（接口返回为空）');
+    } catch (e: any) {
+        setChatModelsError(e.message || '获取失败');
+    } finally {
+        setChatModelsLoading(false);
+    }
+  };
+  
+  const fetchImageModels = async () => {
+    setImageModelsError(null);
+    setImageModelOptions([]);
+    
+    if (!tempConfig.ai.image.apiKey && !tempConfig.ai.chat.apiKey) {
+        setImageModelsError('请先填写绘图 API Key（或在对话模型中填写 API Key 以复用）');
+        return;
+    }
+    
+    // Prevent confusing config: image provider differs but tries to reuse chat key.
+    if (!tempConfig.ai.image.apiKey && tempConfig.ai.image.provider !== tempConfig.ai.chat.provider) {
+        setImageModelsError('绘图未填写 API Key，且服务提供商与对话不同，无法复用对话 Key，请填写绘图 API Key。');
+        return;
+    }
+    
+    const effectiveConfig: AIConfig = {
+        ...tempConfig.ai.image,
+        apiKey: tempConfig.ai.image.apiKey || tempConfig.ai.chat.apiKey,
+    };
+    
+    setImageModelsLoading(true);
+    try {
+        const models = await listModels(effectiveConfig);
+        setImageModelOptions(models);
+        if (models.length === 0) setImageModelsError('未获取到任何模型（接口返回为空）');
+    } catch (e: any) {
+        setImageModelsError(e.message || '获取失败');
+    } finally {
+        setImageModelsLoading(false);
+    }
+  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>, type: 'config' | 'user') => {
       if(e.target.files?.[0]) {
@@ -188,15 +247,43 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         </div>
                         <div className="col-span-1">
                             <PixelLabel>模型名称 (Model Name)</PixelLabel>
-                            <div className="relative">
-                                <Cpu size={14} className="absolute left-2 top-3 text-gray-400"/>
-                                <PixelInput 
-                                    value={tempConfig.ai.chat.chatModel}
-                                    onChange={(e) => updateAiConfig('chat', 'chatModel', e.target.value)}
-                                    placeholder="gemini-3-flash-preview"
-                                    className="pl-8"
-                                />
+                            <div className="flex gap-2 items-start">
+                                <div className="relative flex-1">
+                                    <Cpu size={14} className="absolute left-2 top-3 text-gray-400"/>
+                                    <PixelInput 
+                                        value={tempConfig.ai.chat.chatModel}
+                                        onChange={(e) => updateAiConfig('chat', 'chatModel', e.target.value)}
+                                        placeholder="gemini-3-flash-preview"
+                                        className="pl-8"
+                                    />
+                                </div>
+                                <PixelButton 
+                                    onClick={fetchChatModels} 
+                                    variant="secondary"
+                                    disabled={chatModelsLoading}
+                                    className="px-2 py-2 flex items-center gap-1 text-xs whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
+                                    title="从服务提供商获取可用模型列表"
+                                >
+                                    <RefreshCw size={14} className={chatModelsLoading ? 'animate-spin' : ''}/> 获取模型
+                                </PixelButton>
                             </div>
+                            {chatModelsError && (
+                                <p className="text-[10px] text-red-600 mt-1">{chatModelsError}</p>
+                            )}
+                            {chatModelOptions.length > 0 && (
+                                <div className="mt-2">
+                                    <PixelSelect
+                                        value={tempConfig.ai.chat.chatModel}
+                                        onChange={(e) => updateAiConfig('chat', 'chatModel', e.target.value)}
+                                        className="text-xs"
+                                    >
+                                        {chatModelOptions.map(m => (
+                                            <option key={m} value={m}>{m}</option>
+                                        ))}
+                                    </PixelSelect>
+                                    <p className="text-[10px] text-gray-500 mt-1">从列表选择后会自动填入上方</p>
+                                </div>
+                            )}
                         </div>
                         <div className="col-span-1">
                              <PixelLabel>随机性 (Temperature): {tempConfig.ai.chat.temperature}</PixelLabel>
@@ -255,11 +342,41 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         </div>
                          <div className="col-span-1">
                             <PixelLabel>模型名称</PixelLabel>
-                            <PixelInput 
-                                value={tempConfig.ai.image.imageModel}
-                                onChange={(e) => updateAiConfig('image', 'imageModel', e.target.value)}
-                                placeholder="gemini-2.5-flash-image"
-                            />
+                            <div className="flex gap-2 items-start">
+                                <div className="flex-1">
+                                    <PixelInput 
+                                        value={tempConfig.ai.image.imageModel}
+                                        onChange={(e) => updateAiConfig('image', 'imageModel', e.target.value)}
+                                        placeholder="gemini-2.5-flash-image"
+                                    />
+                                </div>
+                                <PixelButton 
+                                    onClick={fetchImageModels} 
+                                    variant="secondary"
+                                    disabled={imageModelsLoading}
+                                    className="px-2 py-2 flex items-center gap-1 text-xs whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
+                                    title="从服务提供商获取可用模型列表"
+                                >
+                                    <RefreshCw size={14} className={imageModelsLoading ? 'animate-spin' : ''}/> 获取模型
+                                </PixelButton>
+                            </div>
+                            {imageModelsError && (
+                                <p className="text-[10px] text-red-600 mt-1">{imageModelsError}</p>
+                            )}
+                            {imageModelOptions.length > 0 && (
+                                <div className="mt-2">
+                                    <PixelSelect
+                                        value={tempConfig.ai.image.imageModel}
+                                        onChange={(e) => updateAiConfig('image', 'imageModel', e.target.value)}
+                                        className="text-xs"
+                                    >
+                                        {imageModelOptions.map(m => (
+                                            <option key={m} value={m}>{m}</option>
+                                        ))}
+                                    </PixelSelect>
+                                    <p className="text-[10px] text-gray-500 mt-1">从列表选择后会自动填入上方</p>
+                                </div>
+                            )}
                         </div>
                     </div>
                     <div className="mt-4 flex justify-end">
